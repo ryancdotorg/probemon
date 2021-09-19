@@ -91,25 +91,21 @@ def interface_existence_check():
 		if check_for_status_zero_for_interface == 0:
 			print (iface + " interface exists")
 			print ("Entering monitor mode...")
-
 			return True
 		else:
-			print ("iface doesn't exist.")
+			print (iface + " doesn't exist.")
 			print ("Check your setting for the wireless interface.")
 			print ("If you updated any OS packages, don't forget to reload any custom wireless drivers.")
-			print ("See the main README.md for guidance with drivers for the 8812au and 8814au devices")
-
+			
 			if current_retries < INTERFACE_RETRIES_BEFORE_QUIT:
 				current_retries += 1
 				interface_existence_check()
 				return False
-
 			sys.exit()
 
 def kill_interfering_services():
 	# these are services that are stopped in Ubuntu/Debian
 	# they have traditionally caused problems for any wireless interface in monitor mode
-	# wpa_supplicant has to be stopped before WUDS launches
 	subprocess.call("sudo systemctl stop wpa_supplicant", shell=True)
 	subprocess.call("sudo systemctl stop avahi-daemon", shell=True)
 
