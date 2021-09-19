@@ -1,4 +1,17 @@
-#!/usr/bin/env python
+#!/usr/bin/python3
+
+# CHANGELOG
+# 19SEP2021 - successfully converted this to python3
+#             ord() call removed on or near line 63; added "decode()" in some print statements that needed to print a byte datatype
+#             adjusted other print statements by adding parentheses where needed
+#             left in the filter for "DeprecationWarning" just in case it is needed
+#
+# 19SEP2021 - successfully added auto deletion of python 3 bytecode cache files and folders
+#
+# 19SEP2021 - fixed bug on or near line 134; packet gets skipped if 'signal' didn't make it into rtmeta; this was causing the script to crash
+#
+# Notes: the monitoring interface will be left in monitor mode when the script finishes
+
 import logging
 
 import pcapy
@@ -7,10 +20,20 @@ from radiotapparser import RadioTapParser
 
 from binascii import hexlify
 
+import os
+import glob
+
 import sys
+sys.dont_write_bytecode = True
 import struct
 import json
+import subprocess
 import time
+import traceback
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+sys.dont_write_bytecode = True
 
 MGMT_TYPE = 0x00
 PROBE_SUBTYPE = 0x04
@@ -46,11 +69,61 @@ S_DEAUTH = 12
 
 FLAG_BAD_FCS = 0x40
 
+# relies on parsing output from iwconfig to make sure that the specified interface is in monitor mode
+def interface_monitor_mode_check():
+	# TODO switch from iwconfig to iw; iwconfig is deprecated
+	check_for_monitor_mode_for_interface = subprocess.check_output(''.join(['iwconfig ',iface,' | grep \'Mode:\' | awk -F \':\' \'{print $2}\' | awk \'{print $1}\'']), shell=True)
+	#strip the newline character from the end
+	check_for_monitor_mode_for_interface = check_for_monitor_mode_for_interface.rstrip().decode()
+	if check_for_monitor_mode_for_interface != 'Monitor':
+		print("Monitor mode is not enabled.")
+		print("Increase the DEVICE_STARTUP_MONITOR_MODE_DELAY value and check the installed driver.")
+		sys.exit()
+	else:
+	    print("Monitor mode is enabled.  Check passed.")
+
+def interface_existence_check():
+		""" get the status code of "ip link show interface_name"
+		 a status code of zero indicates that it found the interface in the OS and executed cleanly """
+		current_retries = 0
+		check_for_status_zero_for_interface = os.system(''.join(['ip link show ', iface]))
+		#print (str(check_for_status_zero_for_interface))
+		if check_for_status_zero_for_interface == 0:
+			print (iface + " interface exists")
+			print ("Entering monitor mode...")
+
+			return True
+		else:
+			print ("iface doesn't exist.")
+			print ("Check your setting for the wireless interface.")
+			print ("If you updated any OS packages, don't forget to reload any custom wireless drivers.")
+			print ("See the main README.md for guidance with drivers for the 8812au and 8814au devices")
+
+			if current_retries < INTERFACE_RETRIES_BEFORE_QUIT:
+				current_retries += 1
+				interface_existence_check()
+				return False
+
+			sys.exit()
+
+def kill_interfering_services():
+	# these are services that are stopped in Ubuntu/Debian
+	# they have traditionally caused problems for any wireless interface in monitor mode
+	# wpa_supplicant has to be stopped before WUDS launches
+	subprocess.call("sudo systemctl stop wpa_supplicant", shell=True)
+	subprocess.call("sudo systemctl stop avahi-daemon", shell=True)
+
+def restore_interfering_services():
+	# restore wpa_supplicant upon exit
+	subprocess.call("sudo systemctl start wpa_supplicant", shell=True)
+	subprocess.call("sudo systemctl start avahi-daemon", shell=True)
+
 def timestamp():
 	return time.strftime('%Y-%m-%d %H:%M:%S %z')
 
 def encodeMac(s):
-	return ':'.join(( '%.2x' % ord(i) for i in s ))
+	#return ':'.join(( '%.2x' % ord(i) for i in s ))
+	return ':'.join(( '%.2x' % i for i in s ))
 
 parse_radiotap = RadioTapParser()
 headerSize = struct.calcsize(FMT_HEADER_80211)
@@ -59,6 +132,9 @@ def handler(hdr, pkt, iface=None):
 	#print json.dumps(rtmeta)
 	# Skip packet if rtmeta looks bad
 	if 'flags' not in rtmeta:
+		return
+	# skip packet if 'signal' didn't make it into rtmeta
+	if 'signal' not in rtmeta:
 		return
 	# Don't try to process packets with bad checksum
 	if rtmeta['flags'] & FLAG_BAD_FCS:
@@ -79,6 +155,7 @@ def handler(hdr, pkt, iface=None):
 	# dispatch packet data to appropriate handler
 	if ftype == T_DATA and frameControl & DS_MASK == TO_DS:
 		#print '# data (%u) %s -> %s' % (stype, encodeMac(addr2), encodeMac(addr1))
+		#print('# data (%u) %s -> %s %s' % (stype, encodeMac(addr2), encodeMac(addr1), rtmeta['signal']))
 		handle_data(iface, rtmeta['freq'][0], rtmeta['signal'], encodeMac(addr2), encodeMac(addr1))
 	elif ftype == T_MGMT and stype == S_PROBE_REQ:
 		handle_probe_req(iface, rtmeta['freq'][0], rtmeta['signal'], encodeMac(addr2), body)
@@ -167,7 +244,7 @@ def handle_ap(signal, bssid):
 known_stations = {}
 def handle_station(signal, sa, essid=None, bssid=None):
 	if sa not in known_stations:
-		print '[%s] new station %s' % (timestamp(), sa)
+		print('[%s] new station %s' % (timestamp(), sa))
 		known_stations[sa] = {
 			'essids': set(),
 			'bssids': set(),
@@ -178,11 +255,11 @@ def handle_station(signal, sa, essid=None, bssid=None):
 
 	if essid is not None and essid not in known_stations[sa]['essids']:
 		known_stations[sa]['essids'].add(essid)
-		print '[%s] new probe for station %s "%s"' % (timestamp(), sa, essid) 
+		print('[%s] new probe for station %s "%s"' % (timestamp(), sa, essid.decode()))
 
 	if bssid is not None and bssid not in known_stations[sa]['bssids']:
 		known_stations[sa]['bssids'].add(bssid)
-		print '[%s] new bssid for station %s %s' % (timestamp(), sa, bssid) 
+		print('[%s] new bssid for station %s %s' % (timestamp(), sa, bssid)) 
 
 	print_station(sa)
 	if known_stations[sa]['rstsig'] is None:
@@ -192,23 +269,23 @@ def handle_station(signal, sa, essid=None, bssid=None):
 
 known_networks = {}
 def handle_network(bssid, essid):
-        if bssid not in known_networks:
+	if bssid not in known_networks:
 		known_networks[bssid] = set()
 	if bssid in known_networks and essid in known_networks[bssid]:
 		return
 	known_networks[bssid].add(essid)
-	print '[%s] new network %s "%s"' % (timestamp(), bssid, essid)
+	print('[%s] new network %s "%s"' % (timestamp(), bssid, essid.decode()))
 
 def print_station(sa):
 	if known_stations[sa]['rstsig'] is not None and known_stations[sa]['rstsig'] + 60 < time.time():
-		print '[%s] station active %s %ddBm %ddBm' % (timestamp(), sa, known_stations[sa]['minsig'], known_stations[sa]['maxsig'])
+		print('[%s] station active %s %ddBm %ddBm' % (timestamp(), sa, known_stations[sa]['minsig'], known_stations[sa]['maxsig']))
 		known_stations[sa]['rstsig'] = None
 		known_stations[sa]['minsig'] =  200
 		known_stations[sa]['maxsig'] = -200
 
 def print_ap(bssid):
 	if known_aps[bssid]['rstsig'] is not None and known_aps[bssid]['rstsig'] + 60 < time.time():
-		print '[%s] bssid active %s %ddBm %ddBm' % (timestamp(), bssid, known_aps[bssid]['minsig'], known_aps[bssid]['maxsig'])
+		print('[%s] bssid active %s %ddBm %ddBm' % (timestamp(), bssid, known_aps[bssid]['minsig'], known_aps[bssid]['maxsig']))
 		known_aps[bssid]['rstsig'] = None
 		known_aps[bssid]['minsig'] =  200
 		known_aps[bssid]['maxsig'] = -200
@@ -219,19 +296,55 @@ if __name__ == "__main__":
 
 	caps = {}
 	for iface in sys.argv[1:]:
+		monitor_enable  = ''.join(['sudo ip link set ', iface, ' down;sudo iw ', iface, ' set monitor control;sudo ip link set ', iface, ' up'])
+		iw_dev = 'sudo iw dev'
+		INTERFACE_RETRIES_BEFORE_QUIT = 5
+		DEVICE_STARTUP_MONITOR_MODE_DELAY = 3
+		
+		interface_existence_check()
+		kill_interfering_services()
+		os.system(monitor_enable)
+		time.sleep(DEVICE_STARTUP_MONITOR_MODE_DELAY) # Delay to wait for monitor mode
+		# insert check here for confirmation of monitor mode
+		interface_monitor_mode_check()
+		os.system(iw_dev)
+
 		cap = pcapy.open_live(iface, 4096, 1, 10)
 		cap.setfilter(bpf)
 		caps[iface] = cap
-		print "Listening on %s: linktype=%d" % (iface, cap.datalink())
+		print("Listening on %s: linktype=%d" % (iface, cap.datalink()))
 
 	next_cleanup = time.time()
 	while True:
-		if next_cleanup < time.time():
-			next_cleanup += 5
-			for sa in known_stations:
-				print_station(sa)
-			for bssid in known_aps:
-				print_ap(bssid)
-		for iface, cap in caps.items():
-			# process all the buffered packets
-			cap.dispatch(-1, lambda hdr, pkt: handler(hdr, pkt, iface))
+		try:
+			if next_cleanup < time.time():
+				next_cleanup += 5
+				for sa in known_stations:
+					print_station(sa)
+				for bssid in known_aps:
+					print_ap(bssid)
+			for iface, cap in list(caps.items()):
+			#for iface, cap in caps.items():
+				# process all the buffered packets
+				cap.dispatch(-1, lambda hdr, pkt: handler(hdr, pkt, iface))
+		except KeyboardInterrupt:
+			# delete python3 bytecode trash
+			path_of_this_script = os.path.dirname(os.path.abspath(sys.argv[0]))
+			print (path_of_this_script)
+			pyCacheFiles = glob.glob(path_of_this_script + "/**/*.pyc", recursive = True)
+			pyCacheFolders = glob.glob(path_of_this_script + "/**/__pycache__", recursive = True)
+
+			for file in pyCacheFiles:
+				try:
+					print('Auto deleting cache file: ' + file)
+					os.remove(file)
+				except:
+					print("Error removing .pyc files.")
+
+			for dir in pyCacheFolders:
+				try:
+					print('Auto deleting cache dir: ' + dir)
+					os.removedirs(dir)
+				except:
+					print("Error removing _pycache__ directories.")			
+			os._exit(0)
